@@ -89,6 +89,127 @@ final class Mp4Metadata
         }
     }
 
+
+    /**
+     * Return same-size byte patches for fragmented MP4 duration fields.
+     * Browsers can otherwise expose a zero/infinite duration when Reolink leaves
+     * mvhd/tkhd/mdhd durations at zero even though moof/trun samples are valid.
+     *
+     * @return list<array{offset:int,bytes:string}>
+     */
+    public static function durationPatches(string $path, float $expectedDuration): array
+    {
+        if ($expectedDuration <= 0) {
+            return [];
+        }
+        $handle = @fopen($path, 'rb');
+        if ($handle === false) {
+            return [];
+        }
+        try {
+            $fileSize = filesize($path);
+            if ($fileSize === false) {
+                return [];
+            }
+            $moov = self::findBox($handle, 0, (int) $fileSize, 'moov');
+            if ($moov === null || self::findBox($handle, $moov['payload'], $moov['end'], 'mvex') === null) {
+                return [];
+            }
+            $mvhd = self::findBox($handle, $moov['payload'], $moov['end'], 'mvhd');
+            if ($mvhd === null) {
+                return [];
+            }
+            $movieField = self::durationField($handle, $mvhd, 'mvhd');
+            if ($movieField === null || $movieField['timescale'] <= 0) {
+                return [];
+            }
+            $movieTimescale = $movieField['timescale'];
+            $fields = [[$movieField, $movieTimescale]];
+
+            foreach (self::boxes($handle, $moov['payload'], $moov['end']) as $child) {
+                if ($child['type'] !== 'trak') {
+                    continue;
+                }
+                $tkhd = self::findBox($handle, $child['payload'], $child['end'], 'tkhd');
+                if ($tkhd !== null && ($field = self::durationField($handle, $tkhd, 'tkhd')) !== null) {
+                    $fields[] = [$field, $movieTimescale];
+                }
+                $mdia = self::findBox($handle, $child['payload'], $child['end'], 'mdia');
+                if ($mdia !== null) {
+                    $mdhd = self::findBox($handle, $mdia['payload'], $mdia['end'], 'mdhd');
+                    if ($mdhd !== null && ($field = self::durationField($handle, $mdhd, 'mdhd')) !== null && $field['timescale'] > 0) {
+                        $fields[] = [$field, $field['timescale']];
+                    }
+                }
+            }
+
+            $patches = [];
+            foreach ($fields as [$field, $timescale]) {
+                $desired = (int) round($expectedDuration * $timescale);
+                $maximum = $field['width'] === 4 ? 0xFFFFFFFF : PHP_INT_MAX;
+                if ($desired <= 0 || $desired > $maximum) {
+                    continue;
+                }
+                if (($field['current'] / $timescale) >= $expectedDuration - 0.5) {
+                    continue;
+                }
+                $bytes = $field['width'] === 4
+                    ? pack('N', $desired)
+                    : self::packU64($desired);
+                $patches[] = ['offset' => $field['offset'], 'bytes' => $bytes];
+            }
+            return $patches;
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    /** @return array{offset:int,width:int,timescale:int,current:int}|null */
+    private static function durationField($handle, array $box, string $kind): ?array
+    {
+        if (fseek($handle, $box['payload']) !== 0) {
+            return null;
+        }
+        $payload = fread($handle, min(40, $box['end'] - $box['payload']));
+        if ($payload === false || strlen($payload) < 24) {
+            return null;
+        }
+        $version = ord($payload[0]);
+        if (!in_array($version, [0, 1], true)) {
+            return null;
+        }
+        if ($kind === 'mvhd' || $kind === 'mdhd') {
+            $scaleOffset = $version === 0 ? 12 : 20;
+            $durationOffset = $version === 0 ? 16 : 24;
+        } elseif ($kind === 'tkhd') {
+            $scaleOffset = null;
+            $durationOffset = $version === 0 ? 20 : 28;
+        } else {
+            return null;
+        }
+        $width = $version === 0 ? 4 : 8;
+        if (strlen($payload) < $durationOffset + $width) {
+            return null;
+        }
+        $timescale = $scaleOffset === null ? 0 : self::u32(substr($payload, $scaleOffset, 4));
+        $current = $width === 4
+            ? self::u32(substr($payload, $durationOffset, 4))
+            : self::u64(substr($payload, $durationOffset, 8));
+        return [
+            'offset' => $box['payload'] + $durationOffset,
+            'width' => $width,
+            'timescale' => $timescale,
+            'current' => $current,
+        ];
+    }
+
+    private static function packU64(int $value): string
+    {
+        $high = intdiv($value, 4294967296);
+        $low = $value % 4294967296;
+        return pack('NN', $high, $low);
+    }
+
     /** @return array{0:array<int,int>,1:array<int,int>} */
     private static function readTrackDefaults($handle, array $moov): array
     {
