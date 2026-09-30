@@ -670,6 +670,7 @@ function cameraStats(camera) {
 async function scanCam(id) {
   try {
     const camera = S.cameras.find(item => item.id === id);
+    let completedSynchronously = false;
     if (camera?.indexing_mode === 'partitioned') {
       const range = selectedDayRange();
       if (!range) throw new Error(t('cameras.selectDayFirst'));
@@ -679,8 +680,16 @@ async function scanCam(id) {
         { method: 'POST' },
       );
       S.loadingPartitions += result.partitions || 0;
+      completedSynchronously = result.status === 'ready';
     } else {
-      await api('/api/scan/' + id, { method: 'POST' });
+      const result = await api('/api/scan/' + id, { method: 'POST' });
+      completedSynchronously = result.status === 'done';
+    }
+    if (completedSynchronously) {
+      document.getElementById('topbar-status').textContent = t('status.ready');
+      await loadCameras();
+      await loadTimeline(undefined, undefined, false);
+      return;
     }
     if (camera) camera.source_status = 'scanning';
     renderCamList();
@@ -1196,7 +1205,12 @@ document.getElementById('btn-scan-all').onclick = async () => {
       );
       S.loadingPartitions += result.partitions || 0;
     }
-    await api('/api/scan', { method: 'POST' });
+    const scanResult = await api('/api/scan', { method: 'POST' });
+    if (scanResult.status === 'done') {
+      document.getElementById('topbar-status').textContent = t('status.ready');
+      await loadCameras();
+      await loadTimeline(undefined, undefined, false);
+    }
   }
   catch(e) { toast(t('cameras.errorScan', {message: localizeMessage(e.message)}), 'error'); }
 };
