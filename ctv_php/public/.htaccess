@@ -1,0 +1,8 @@
+Options -Indexes
+RewriteEngine On
+
+# Route the shared-host PHP backend and the reused ctv_web assets through the
+# front controller. Protect this directory with the hosting provider's HTTP
+# authentication / directory privacy feature before exposing surveillance data.
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^ index.php [QSA,L]
