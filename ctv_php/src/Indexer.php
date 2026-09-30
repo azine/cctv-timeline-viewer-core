@@ -203,7 +203,11 @@ SQL);
 
                     $start = $this->extractTimestamp($video['filename'], $camera['timezone']) ?? $video['mtime'];
                     $duration = Mp4Metadata::duration($path);
-                    $end = $duration > 0 ? $start + $duration : null;
+                    if ($duration <= 0) {
+                        $counts['skipped']++;
+                        continue;
+                    }
+                    $end = $start + $duration;
                     $thumbnail = $this->nearestSnapshot($start, $snapshots);
                     $upsert->execute([
                         $cameraId,
