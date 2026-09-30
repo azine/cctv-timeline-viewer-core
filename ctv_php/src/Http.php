@@ -28,7 +28,7 @@ final class Http
         return $data;
     }
 
-    public static function serveFile(string $path, string $mime, bool $allowRange = false): never
+    public static function serveFile(string $path, string $mime, bool $allowRange = false, array $patches = []): never
     {
         if (!is_file($path) || !is_readable($path)) {
             throw new HttpException(404, 'File not found');
@@ -107,6 +107,10 @@ final class Http
                 if ($chunk === false || $chunk === '') {
                     break;
                 }
+                if ($patches !== []) {
+                    $absoluteOffset = $end - $remaining + 1;
+                    $chunk = self::patchChunk($chunk, $absoluteOffset, $patches);
+                }
                 echo $chunk;
                 $remaining -= strlen($chunk);
                 flush();
@@ -116,6 +120,26 @@ final class Http
         }
         exit;
     }
+    /** @param list<array{offset:int,bytes:string}> $patches */
+    private static function patchChunk(string $chunk, int $absoluteOffset, array $patches): string
+    {
+        $chunkEnd = $absoluteOffset + strlen($chunk);
+        foreach ($patches as $patch) {
+            $patchStart = $patch['offset'];
+            $patchEnd = $patchStart + strlen($patch['bytes']);
+            $overlapStart = max($absoluteOffset, $patchStart);
+            $overlapEnd = min($chunkEnd, $patchEnd);
+            if ($overlapStart >= $overlapEnd) {
+                continue;
+            }
+            $sourceStart = $overlapStart - $patchStart;
+            $targetStart = $overlapStart - $absoluteOffset;
+            $length = $overlapEnd - $overlapStart;
+            $chunk = substr_replace($chunk, substr($patch['bytes'], $sourceStart, $length), $targetStart, $length);
+        }
+        return $chunk;
+    }
+
 }
 
 final class HttpException extends \RuntimeException
