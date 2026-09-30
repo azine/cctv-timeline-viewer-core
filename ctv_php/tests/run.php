@@ -31,6 +31,19 @@ try {
     file_put_contents($file, $mp4);
     check(abs(Mp4Metadata::duration($file) - 28.8) < 0.001, 'MP4 mvhd duration should be parsed');
 
+    $zeroMvhd = chr(0) . "\0\0\0" . pack('N', 0) . pack('N', 0) . pack('N', 1000) . pack('N', 0) . str_repeat("\0", 80);
+    $tkhd = chr(0) . "\0\0\0" . pack('N', 0) . pack('N', 0) . pack('N', 1) . pack('N', 0) . pack('N', 0) . str_repeat("\0", 64);
+    $mdhd = chr(0) . "\0\0\0" . pack('N', 0) . pack('N', 0) . pack('N', 1000) . pack('N', 0) . pack('N', 0);
+    $trex = chr(0) . "\0\0\0" . pack('N', 1) . pack('N', 1) . pack('N', 100) . pack('N', 0) . pack('N', 0);
+    $fragmented = box('ftyp', 'isom' . str_repeat("\0", 12))
+        . box('moov', box('mvhd', $zeroMvhd) . box('trak', box('tkhd', $tkhd) . box('mdia', box('mdhd', $mdhd))) . box('mvex', box('trex', $trex)))
+        . box('moof', box('traf', box('tfhd', chr(0) . "\0\0\0" . pack('N', 1)) . box('trun', chr(0) . "\0\0\0" . pack('N', 10))))
+        . box('mdat', str_repeat("\0", 16));
+    $fragmentedFile = $tmp . '/fragmented.mp4';
+    file_put_contents($fragmentedFile, $fragmented);
+    check(abs(Mp4Metadata::duration($fragmentedFile) - 1.0) < 0.001, 'Fragmented MP4 duration should be summed from trun/trex');
+    check(count(Mp4Metadata::durationPatches($fragmentedFile, 1.0)) === 3, 'Fragmented MP4 should patch mvhd/tkhd/mdhd duration fields');
+
     if (!in_array('sqlite', PDO::getAvailableDrivers(), true)) {
         fwrite(STDOUT, "ctv_php MP4 tests passed; SQLite integration skipped (pdo_sqlite unavailable)\n");
         exit(0);
