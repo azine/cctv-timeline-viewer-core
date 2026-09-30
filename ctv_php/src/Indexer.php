@@ -28,9 +28,11 @@ final class Indexer
         $path = $this->partitionPath($camera['source_path'], $camera['directory_pattern'], $day);
         if (!is_dir($path)) {
             $this->savePartitionState((int) $camera['id'], $day, 'missing', 0, 0);
-            $this->db->prepare('UPDATE cameras SET source_status = ?, source_error = ?, last_scan_completed = ? WHERE id = ?')
-                ->execute(['offline', 'Directory not found: ' . $path, microtime(true), $camera['id']]);
-            return ['new' => 0, 'updated' => 0, 'missing' => 0, 'skipped' => 0, 'total' => 0];
+            $missing = $this->db->prepare("UPDATE recordings SET availability='missing' WHERE camera_id=? AND partition_key=? AND availability='available'");
+            $missing->execute([$camera['id'], $day]);
+            $this->db->prepare('UPDATE cameras SET source_status = ?, source_error = NULL, last_scan_completed = ? WHERE id = ?')
+                ->execute([is_dir($camera['source_path']) ? 'online' : 'offline', microtime(true), $camera['id']]);
+            return ['new' => 0, 'updated' => 0, 'missing' => $missing->rowCount(), 'skipped' => 0, 'total' => 0];
         }
         return $this->indexDirectory($camera, $path, $day, true);
     }
