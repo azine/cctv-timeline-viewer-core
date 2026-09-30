@@ -224,6 +224,24 @@ async function loadCameras() {
 
 async function loadSession() {
   S.session = await api('/api/session');
+  const capabilities = S.session.capabilities || {};
+  if (capabilities.transcoding === false) {
+    S.streamProfile = 'native';
+    localStorage.setItem('ctv-stream-profile', 'native');
+    const quality = document.getElementById('quality-select');
+    quality.value = 'native';
+    [...quality.options].forEach(option => {
+      if (option.value !== 'native') option.hidden = true;
+    });
+    document.getElementById('stream-profile-settings').hidden = true;
+  }
+  if (capabilities.home_assistant_events === false) {
+    document.querySelector('.ha-event-picker')?.setAttribute('hidden', '');
+    document.getElementById('event-filter-wrap').hidden = true;
+  }
+  if (capabilities.server_autoscan === false) {
+    document.getElementById('autoscan-settings').hidden = true;
+  }
   const isAdmin = Boolean(S.session.is_admin);
   document.querySelector('.tab[data-tab="cameras"]').hidden = !isAdmin;
   document.getElementById('view-cameras').hidden = !isAdmin;
@@ -382,6 +400,7 @@ function applyHotspotCellPositions() {
 
 function aspectRatio() {
   if (S.aspectMode === '16/9') return 16 / 9;
+  if (S.aspectMode === '1/1') return 1;
   return 4 / 3;
 }
 
