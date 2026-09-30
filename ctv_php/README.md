@@ -107,13 +107,23 @@ video endpoint is under the same document root, that also protects original
 recordings.
 
 Do not expose the raw Reolink upload directory as an unauthenticated static web
-directory.
+directory. If the FTP target sits below a web document root, explicitly deny
+HTTP access to that directory (for example with the hosting control panel or a
+`Require all denied` rule) and let the authenticated viewer serve recordings.
 
 ## Video delivery
 
 Native playback uses `/video/{recording_id}`. PHP validates the database record
 and serves the original MP4 with HTTP byte-range support, which allows normal
-HTML5 seeking. The original recording is never copied or transcoded.
+HTML5 seeking. Reolink fragmented MP4 duration fields are patched in-flight so
+the browser sees the indexed duration. The original recording is never copied
+or transcoded.
+
+The PHP backend cannot convert codecs. H.264/AAC MP4 (as used by the tested
+P520 sample) is broadly browser-compatible. If another camera uploads H.265/
+HEVC, native playback depends on the client browser/OS codec support; configure
+that camera to upload an H.264 stream if reliable cross-browser playback is
+required.
 
 For high-concurrency installations a web-server-native internal file handoff
 would be more efficient than PHP streaming, but for a small four-camera archive
