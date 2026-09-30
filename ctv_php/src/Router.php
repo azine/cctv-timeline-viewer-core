@@ -140,7 +140,8 @@ final class Router
                 if ($row['availability'] !== 'available') {
                     throw new HttpException(410, 'Recording no longer available');
                 }
-                Http::serveFile($row['path'], 'video/mp4', true);
+                $patches = Mp4Metadata::durationPatches($row['path'], (float) $row['duration']);
+                Http::serveFile($row['path'], 'video/mp4', true, $patches);
             }
 
             if ($path === '/api/search' && $method === 'GET') {
