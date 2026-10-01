@@ -224,6 +224,24 @@ async function loadCameras() {
 
 async function loadSession() {
   S.session = await api('/api/session');
+  const capabilities = S.session.capabilities || {};
+  if (capabilities.transcoding === false) {
+    S.streamProfile = 'native';
+    localStorage.setItem('ctv-stream-profile', 'native');
+    const quality = document.getElementById('quality-select');
+    quality.value = 'native';
+    [...quality.options].forEach(option => {
+      if (option.value !== 'native') option.hidden = true;
+    });
+    document.getElementById('stream-profile-settings').hidden = true;
+  }
+  if (capabilities.home_assistant_events === false) {
+    document.querySelector('.ha-event-picker')?.setAttribute('hidden', '');
+    document.getElementById('event-filter-wrap').hidden = true;
+  }
+  if (capabilities.server_autoscan === false) {
+    document.getElementById('autoscan-settings').hidden = true;
+  }
   const isAdmin = Boolean(S.session.is_admin);
   document.querySelector('.tab[data-tab="cameras"]').hidden = !isAdmin;
   document.getElementById('view-cameras').hidden = !isAdmin;
@@ -382,6 +400,7 @@ function applyHotspotCellPositions() {
 
 function aspectRatio() {
   if (S.aspectMode === '16/9') return 16 / 9;
+  if (S.aspectMode === '1/1') return 1;
   return 4 / 3;
 }
 
@@ -651,6 +670,7 @@ function cameraStats(camera) {
 async function scanCam(id) {
   try {
     const camera = S.cameras.find(item => item.id === id);
+    let completedSynchronously = false;
     if (camera?.indexing_mode === 'partitioned') {
       const range = selectedDayRange();
       if (!range) throw new Error(t('cameras.selectDayFirst'));
@@ -660,8 +680,16 @@ async function scanCam(id) {
         { method: 'POST' },
       );
       S.loadingPartitions += result.partitions || 0;
+      completedSynchronously = result.status === 'ready';
     } else {
-      await api('/api/scan/' + id, { method: 'POST' });
+      const result = await api('/api/scan/' + id, { method: 'POST' });
+      completedSynchronously = result.status === 'done';
+    }
+    if (completedSynchronously) {
+      document.getElementById('topbar-status').textContent = t('status.ready');
+      await loadCameras();
+      await loadTimeline(undefined, undefined, false);
+      return;
     }
     if (camera) camera.source_status = 'scanning';
     renderCamList();
@@ -1008,48 +1036,52 @@ document.addEventListener('keydown', e => {
 });
 
 // ═══ SSE ═══
-const evtSource = new EventSource(appUrl('/api/events'));
+let evtSource = null;
 let derivedTimelineRefresh;
 function refreshDerivedTimeline() {
   clearTimeout(derivedTimelineRefresh);
   derivedTimelineRefresh = setTimeout(() => loadTimeline(undefined, undefined, false), 150);
 }
-evtSource.addEventListener('recording_events', refreshDerivedTimeline);
-evtSource.addEventListener('scan', e => {
-  const d = JSON.parse(e.data);
-  const el = document.getElementById('topbar-status');
-  if (d.status === 'started') el.textContent = t('cameras.scanCamera', {id: d.camera_id});
-  else if (d.status === 'done') {
-    el.textContent = t('status.ready'); loadTimeline(); loadCameras();
-    toast(t('cameras.scanComplete', {new: d.new || 0, updated: d.updated || 0, missing: d.missing || 0}), 'info');
-  }
-  else if (d.status === 'error') { el.textContent = t('cameras.sourceUnavailable'); loadCameras(); toast(localizeMessage(d.error), 'error'); }
-  else if (d.status === 'thumbnails') el.textContent = t('cameras.thumbnails', {done: d.done, total: d.total});
-  else if (d.status === 'indexing_done') el.textContent = t('cameras.scanNew', {id: d.camera_id, new: d.new});
-});
-evtSource.addEventListener('partition', e => {
-  const data = JSON.parse(e.data);
-  const status = document.getElementById('topbar-status');
-  if (data.status === 'thumbnails_done') {
-    refreshDerivedTimeline();
-  } else if (data.status === 'started') {
-    status.textContent = t('timeline.loadingPartition', {partition: data.partition});
-    recordPartitionProgress(data);
-  } else if (['done', 'missing', 'error'].includes(data.status)) {
-    const progress = recordPartitionProgress(data, true);
-    if (!progress.wasFinished) S.loadingPartitions = Math.max(0, S.loadingPartitions - 1);
-    status.textContent = data.status === 'error' ? t('cameras.sourceError') : t('status.ready');
-    if (data.status === 'error') toast(localizeMessage(data.error), 'error');
-    loadTimeline(undefined, undefined, false);
-    loadCameras();
-  }
-});
-evtSource.addEventListener('partition_progress', e => {
-  const data = JSON.parse(e.data);
-  const progress = recordPartitionProgress(data);
-  document.getElementById('topbar-status').textContent =
-    t('timeline.loading', {done: progress.done, total: progress.total});
-});
+function startRealtimeEvents() {
+  if (evtSource || S.session.capabilities?.realtime_events === false) return;
+  evtSource = new EventSource(appUrl('/api/events'));
+  evtSource.addEventListener('recording_events', refreshDerivedTimeline);
+  evtSource.addEventListener('scan', e => {
+    const d = JSON.parse(e.data);
+    const el = document.getElementById('topbar-status');
+    if (d.status === 'started') el.textContent = t('cameras.scanCamera', {id: d.camera_id});
+    else if (d.status === 'done') {
+      el.textContent = t('status.ready'); loadTimeline(); loadCameras();
+      toast(t('cameras.scanComplete', {new: d.new || 0, updated: d.updated || 0, missing: d.missing || 0}), 'info');
+    }
+    else if (d.status === 'error') { el.textContent = t('cameras.sourceUnavailable'); loadCameras(); toast(localizeMessage(d.error), 'error'); }
+    else if (d.status === 'thumbnails') el.textContent = t('cameras.thumbnails', {done: d.done, total: d.total});
+    else if (d.status === 'indexing_done') el.textContent = t('cameras.scanNew', {id: d.camera_id, new: d.new});
+  });
+  evtSource.addEventListener('partition', e => {
+    const data = JSON.parse(e.data);
+    const status = document.getElementById('topbar-status');
+    if (data.status === 'thumbnails_done') {
+      refreshDerivedTimeline();
+    } else if (data.status === 'started') {
+      status.textContent = t('timeline.loadingPartition', {partition: data.partition});
+      recordPartitionProgress(data);
+    } else if (['done', 'missing', 'error'].includes(data.status)) {
+      const progress = recordPartitionProgress(data, true);
+      if (!progress.wasFinished) S.loadingPartitions = Math.max(0, S.loadingPartitions - 1);
+      status.textContent = data.status === 'error' ? t('cameras.sourceError') : t('status.ready');
+      if (data.status === 'error') toast(localizeMessage(data.error), 'error');
+      loadTimeline(undefined, undefined, false);
+      loadCameras();
+    }
+  });
+  evtSource.addEventListener('partition_progress', e => {
+    const data = JSON.parse(e.data);
+    const progress = recordPartitionProgress(data);
+    document.getElementById('topbar-status').textContent =
+      t('timeline.loading', {done: progress.done, total: progress.total});
+  });
+}
 
 function clearPartitionProgress(cameraId) {
   const prefix = `${cameraId}:`;
@@ -1177,7 +1209,12 @@ document.getElementById('btn-scan-all').onclick = async () => {
       );
       S.loadingPartitions += result.partitions || 0;
     }
-    await api('/api/scan', { method: 'POST' });
+    const scanResult = await api('/api/scan', { method: 'POST' });
+    if (scanResult.status === 'done') {
+      document.getElementById('topbar-status').textContent = t('status.ready');
+      await loadCameras();
+      await loadTimeline(undefined, undefined, false);
+    }
   }
   catch(e) { toast(t('cameras.errorScan', {message: localizeMessage(e.message)}), 'error'); }
 };
@@ -1303,7 +1340,7 @@ window.addEventListener('orientationchange', scheduleViewportRefresh);
 window._ctvInit = function() {
   updateGridLayout();
   loadSession()
-    .then(() => loadStreamProfiles())
+    .then(() => { startRealtimeEvents(); return loadStreamProfiles(); })
     .then(() => loadCameras())
     .then(() => initializeTimelineDate())
     .then(() => loadTimeline())

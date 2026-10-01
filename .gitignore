@@ -27,3 +27,8 @@ Thumbs.db
 
 # Local design notes and review results.
 /docs/proposals/
+
+# PHP shared-host backend runtime configuration/data
+ctv_php/config.php
+ctv_php/var/*
+!ctv_php/var/.gitkeep

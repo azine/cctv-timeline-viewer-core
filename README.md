@@ -66,6 +66,18 @@ Open `http://localhost:8000`. Use `--reload` only during development.
 Standalone mode has no built-in authentication. Use it on a trusted network or
 behind an authenticated reverse proxy.
 
+## PHP shared-host backend (fork)
+
+This fork also includes `ctv_php/`, a PHP 8.2+/SQLite backend for shared
+hosting where Python and FFmpeg/FFprobe cannot be installed. It reuses the same
+`ctv_web` timeline/player UI, serves H.264 MP4 recordings natively with HTTP
+Range support, reads MP4 duration in pure PHP (including Reolink fragmented
+MP4s), and reuses nearby JPEG snapshots as thumbnails.
+
+The PHP backend intentionally omits server-side transcoding and Home Assistant
+event enrichment. See [ctv_php/README.md](ctv_php/README.md) for deployment,
+configuration, cron indexing, and security instructions.
+
 ## Docker
 
 ```bash
