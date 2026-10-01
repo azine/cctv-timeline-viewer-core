@@ -150,7 +150,85 @@ final class Indexer
                 $existing[$row['path']] = $row;
             }
 
-            $upsert = $this->db->prepare(<<<'SQL'
+            $seen = [];
+            $prepared = [];
+            $restores = [];
+            $missingIds = [];
+            $counts = ['new' => 0, 'updated' => 0, 'missing' => 0, 'skipped' => 0, 'total' => $total];
+            $now = time();
+            $settle = max(0, (int) $this->config['file_settle_seconds']);
+
+            // Parsing MP4 metadata can be comparatively slow. Do all filesystem
+            // and media work before opening a SQLite write transaction so web
+            // requests and cron scans do not hold the database write lock while
+            // walking/re-reading large recording files.
+            foreach ($videos as $video) {
+                $path = $video['path'];
+                $seen[$path] = true;
+                $previous = $existing[$path] ?? null;
+                $unchanged = $previous !== null
+                    && (int) $previous['size'] === $video['size']
+                    && abs((float) $previous['mtime'] - $video['mtime']) < 0.001
+                    && (float) $previous['duration'] > 0;
+
+                if ($unchanged) {
+                    $thumbnail = $previous['thumbnail_path'];
+                    if ($thumbnail === null || !is_file($thumbnail)) {
+                        $start = $this->extractTimestamp($video['filename'], $camera['timezone']) ?? $video['mtime'];
+                        $thumbnail = $this->nearestSnapshot($start, $snapshots);
+                    }
+                    if ($previous['availability'] !== 'available' || $thumbnail !== $previous['thumbnail_path']) {
+                        $restores[] = [$thumbnail, (int) $previous['id']];
+                    }
+                    $counts['skipped']++;
+                    continue;
+                }
+
+                if ($settle > 0 && ($now - (int) $video['mtime']) < $settle) {
+                    $counts['skipped']++;
+                    continue;
+                }
+
+                $start = $this->extractTimestamp($video['filename'], $camera['timezone']) ?? $video['mtime'];
+                $duration = Mp4Metadata::duration($path);
+                if ($duration <= 0) {
+                    // Most commonly this is still an incomplete FTP upload.
+                    // Leave an existing row untouched; a later scan retries it.
+                    $counts['skipped']++;
+                    continue;
+                }
+
+                $prepared[] = [
+                    $cameraId,
+                    $path,
+                    $video['filename'],
+                    $start,
+                    $start + $duration,
+                    $duration,
+                    '',
+                    '',
+                    0,
+                    $video['size'],
+                    $video['mtime'],
+                    $this->nearestSnapshot($start, $snapshots),
+                    $partitionKey,
+                ];
+                $counts[$previous === null ? 'new' : 'updated']++;
+            }
+
+            if ($reconcileMissing) {
+                foreach ($existing as $path => $row) {
+                    if (!isset($seen[$path])) {
+                        $missingIds[] = (int) $row['id'];
+                    }
+                }
+                $counts['missing'] = count($missingIds);
+            }
+
+            $this->db->beginTransaction();
+            try {
+                if ($prepared !== []) {
+                    $upsert = $this->db->prepare(<<<'SQL'
 INSERT INTO recordings (camera_id, path, filename, start_ts, end_ts, duration, codec, resolution, fps, size, mtime, thumbnail_path, partition_key, media_kind, availability)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'video', 'available')
 ON CONFLICT(camera_id, path) DO UPDATE SET
@@ -167,75 +245,25 @@ ON CONFLICT(camera_id, path) DO UPDATE SET
     partition_key=excluded.partition_key,
     availability='available'
 SQL);
-            $seen = [];
-            $counts = ['new' => 0, 'updated' => 0, 'missing' => 0, 'skipped' => 0, 'total' => $total];
-            $now = time();
-            $settle = max(0, (int) $this->config['file_settle_seconds']);
-
-            $this->db->beginTransaction();
-            try {
-                foreach ($videos as $index => $video) {
-                    $path = $video['path'];
-                    $seen[$path] = true;
-                    $previous = $existing[$path] ?? null;
-                    $unchanged = $previous !== null
-                        && (int) $previous['size'] === $video['size']
-                        && abs((float) $previous['mtime'] - $video['mtime']) < 0.001
-                        && (float) $previous['duration'] > 0;
-
-                    if ($unchanged) {
-                        $thumbnail = $previous['thumbnail_path'];
-                        if ($thumbnail === null || !is_file($thumbnail)) {
-                            $start = $this->extractTimestamp($video['filename'], $camera['timezone']) ?? $video['mtime'];
-                            $thumbnail = $this->nearestSnapshot($start, $snapshots);
-                        }
-                        if ($previous['availability'] !== 'available' || $thumbnail !== $previous['thumbnail_path']) {
-                            $restore = $this->db->prepare('UPDATE recordings SET availability = ?, thumbnail_path = ? WHERE id = ?');
-                            $restore->execute(['available', $thumbnail, $previous['id']]);
-                        }
-                        $counts['skipped']++;
-                        continue;
-                    }
-                    if ($settle > 0 && ($now - (int) $video['mtime']) < $settle) {
-                        $counts['skipped']++;
-                        continue;
-                    }
-
-                    $start = $this->extractTimestamp($video['filename'], $camera['timezone']) ?? $video['mtime'];
-                    $duration = Mp4Metadata::duration($path);
-                    if ($duration <= 0) {
-                        $counts['skipped']++;
-                        continue;
-                    }
-                    $end = $start + $duration;
-                    $thumbnail = $this->nearestSnapshot($start, $snapshots);
-                    $upsert->execute([
-                        $cameraId,
-                        $path,
-                        $video['filename'],
-                        $start,
-                        $end,
-                        $duration,
-                        '',
-                        '',
-                        0,
-                        $video['size'],
-                        $video['mtime'],
-                        $thumbnail,
-                        $partitionKey,
-                    ]);
-                    $counts[$previous === null ? 'new' : 'updated']++;
-                }
-
-                if ($reconcileMissing) {
-                    $markMissing = $this->db->prepare('UPDATE recordings SET availability = ? WHERE id = ?');
-                    foreach ($existing as $path => $row) {
-                        if (!isset($seen[$path])) {
-                            $markMissing->execute(['missing', $row['id']]);
-                            $counts['missing']++;
-                        }
+                    foreach ($prepared as $values) {
+                        $upsert->execute($values);
                     }
                 }
+
+                if ($restores !== []) {
+                    $restore = $this->db->prepare("UPDATE recordings SET availability='available', thumbnail_path=? WHERE id=?");
+                    foreach ($restores as $values) {
+                        $restore->execute($values);
+                    }
+                }
+
+                if ($missingIds !== []) {
+                    $markMissing = $this->db->prepare("UPDATE recordings SET availability='missing' WHERE id=?");
+                    foreach ($missingIds as $id) {
+                        $markMissing->execute([$id]);
+                    }
+                }
+
                 $this->db->commit();
             } catch (\Throwable $error) {
                 if ($this->db->inTransaction()) {
