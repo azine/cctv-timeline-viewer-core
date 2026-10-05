@@ -92,3 +92,20 @@ The user's traceback alone does not distinguish PID/thread quota exhaustion from
 memory exhaustion, nor provide a measured thread count on the affected host.
 The unbounded scheduling path above is directly established from the code and
 covered by a regression test; the new limits address both resource pressures.
+
+## Beta.10 — worker exhaustion during cancelled reads
+
+The beta.9 response used asyncio.Task.cancel() on the file sender. Raw task
+cancellation bypasses AnyIO's cooperative shield: a blocked read continues while
+its capacity token is released. A regression against the original beta.9 response
+created 102 total Python threads with a two-token limit after 100 disconnected
+requests. This reproduces a concrete exhaustion mechanism; host resource metrics
+are still unavailable.
+
+Video delivery now cancels through AnyIO CancelScope and waits for the read and
+shielded file close before releasing the cache pin. Simple, single-range and
+multipart delivery use the same protected close. HEAD and If-Range are covered.
+The slow-read regression keeps only two workers, verifies all 100 pins release,
+and runs in CI with a 32-task container limit. Local backend: 149 tests pass;
+JavaScript tests pass. A full-day continuous test on the user's HA host remains
+unperformed; do not describe local accelerated fixtures as that test.
