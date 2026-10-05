@@ -67,3 +67,28 @@ Remaining scope limits: full native GETs without Range and transcoded progressiv
 streams can still take the Supervisor streaming path. An app cannot suppress
 Supervisor's own logs for every downstream disconnect. Check the actual request
 headers in validation before attributing any remaining messages to a cause.
+
+## Resource exhaustion follow-up
+
+User confirmed the old global failure banner was a cached frontend. A later
+beta.8 failure had `RuntimeError: can't start new thread` on health, event polls,
+static pages and video endpoints. This is server resource exhaustion, not proof
+that every recording is invalid.
+
+Found an unbounded thread-per-scan thumbnail scheduling path: a semaphore
+serialized execution but left one waiting daemon thread for each pending scan.
+Replaced it with one worker and a bounded coalescing queue. Also capped AnyIO
+request/file workers at 12, asyncio I/O workers at 4, native remux builds at 2,
+and ffprobe/native-remux codec threads at 1. Health has a separate capacity slot;
+event polling runs on the event loop without requiring a worker thread.
+
+147 backend tests and all JavaScript suites pass. The real-server resource test
+saturates all 12 request slots, verifies health/poll responses, queues 1000
+thumbnail requests and serves 120 video ranges with 15 Python threads locally.
+CI additionally runs this test inside the production image with a 64-task cgroup
+limit and 256 MiB memory limit before a candidate can be tagged.
+
+The user's traceback alone does not distinguish PID/thread quota exhaustion from
+memory exhaustion, nor provide a measured thread count on the affected host.
+The unbounded scheduling path above is directly established from the code and
+covered by a regression test; the new limits address both resource pressures.
